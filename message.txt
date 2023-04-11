@@ -1,0 +1,465 @@
+1. Escreva e teste um programa, em linguagem C, que faga todas as configurações necessárias e que mostre nos
+6 LEDs ligados aos portos RES a RED, o padrão 000001, 000010, 000100, 100000, 000001, 000010,
+100000, 000001,... O padrão deve mudar com uma frequência que depende do estado lógico do "switch" DS3
+(ligado ao porto R82) DS3 OFF, f3Hz; DS3 ON, f=7Hz. O valor da frequência deve ser obtido com o menor
+erro possível
+
+#include <detpic32.h>
+
+void delay(unsigned int ms) {
+        resetCoreTimer();
+        while (readCoreTimer() < 20000 * ms);
+}
+int main() {
+        // RE5 a RE0 como portos de saída
+        // 1111 1111 1100 0000
+        TRISE = TRISE & 0xFFC0;
+        // RB2 como porto de entrada
+        // 0000 0000 0000 0100
+        TRISB = TRISB | 0x0007;
+        unsigned int value, ms;
+        value = 1;
+        while (1) {
+                LATE = (LATE & 0xFFC0) | value;
+                value = value << 1;
+                if (value > 0b100000) value = 1;
+                ms = ((PORTB >> 2) & 0x0001) ? 
+                        1000 / 7 : // Porto RB2 está ON
+                        1000 / 3;  // Porto RB2 está OFF
+                delay(ms);
+        }
+        return 0;
+}
+
+2.Escreva e teste um programa, em linguagem C, que faça todas as configurações necessárias e que converta o
+sinal na entrada do módulo A/D, a frequência de 5Hz, com 2 conversões por cada amostra, e que:
+i) mostre no ecrã do PC a média dos resultados da conversão, em hexadecimal formatado com 3 dígitos (os
+valores devem ser apresentados em linhas consecutivas do ecrã);
+ii) apresente uma medida do valor obtido, numa escala 0 a 9, no display menos significativo da placa;
+iii) a cada nova conversão mude o estado do LED1, ligado ao porto RE1 (valor inicial: RE1=0).
+Faça a deteção do fim de conversão por polling. Edite o seu programa no ficheiro £12.c.
+
+#include <detpic32.h>
+#define NSamples 2
+void delay(unsigned int ms) {
+        resetCoreTimer();
+        while (readCoreTimer() < 20000 * ms);
+}
+void sendToDisplay(unsigned int value) {
+        static const char codes[] = {
+                //gfedcba
+                0b0111111, // 0
+                0b0000110, // 1
+                0b1011011, // 2
+                0b1001111, // 3
+                0b1100110, // 4
+                0b1101101, // 5
+                0b1111101, // 6
+                0b0000111, // 7
+                0b1111111, // 8
+                0b1101111, // 9
+                0b1110111, // a
+                0b1111100, // b
+                0b0111001, // c
+                0b1011110, // d
+                0b1111001, // e
+                0b1110001  // f
+        };
+        LATB = (LATB & 0x80FF) | (codes[value] << 8);
+}
+int main() {
+        TRISBbits.TRISB4 = 1;
+        AD1PCFGbits.PCFG4 = 0;
+        AD1CON1bits.SSRC = 7;
+        AD1CON1bits.CLRASAM = 1;
+        AD1CON3bits.SAMC = 16;
+        AD1CON2bits.SMPI = NSamples - 1;
+        AD1CHSbits.CH0SA = 4;
+        AD1CON1bits.ON = 1;
+        // Portos RD5, RD6 e RB8-RB14 configurados como saída (displays)
+        // TRISD : 1111 1111 1001 1111
+        // TRISB : 1000 0000 1111 1111
+        TRISD = TRISD & 0xFF9F;
+        TRISB = TRISB & 0x80FF;
+        // Porto RE1 configurado como saída (LED1), com valor inicial 0
+        TRISEbits.TRISE1 = 0;
+        LATEbits.LATE1 = 0;
+        while (1) {
+                AD1CON1bits.ASAM = 1;
+                while (IFS1bits.AD1IF == 0);
+                // Parte i)
+                int media = 0;
+                int i;
+                int *p = (int *)(&ADC1BUF0);
+                for (i = 0; i < NSamples; i++) {
+                        media += p[i * 4];
+                }
+                media = media / NSamples;
+                printInt(media, 16 | 3 << 16);
+                putChar('\n');
+                // Parte ii)
+                LATDbits.LATD5 = 1;
+                LATDbits.LATD6 = 0;
+                int value = (media * 9) / 1023;
+                sendToDisplay(value);
+                // Parte iii)
+                LATEbits.LATE1 = !LATEbits.LATE1;
+                IFS1bits.AD1IF = 0;
+                delay(200);
+        }
+}
+
+3.Escreva e teste um programa, em assembly, que faça todas as configurações necessárias e que mostre nos 4
+LEDs, ligados aos portos RE4 a RE1, o padrão 1001, 0110, 1001, 0110, (valor inicial: 1001); o padrão deve
+mudar com uma frequência de 7Hz. O valor do padrão deve também ser mostrado no ecrã do PC, em binário
+formatado com 4 bits, os valores devem ser apresentados em linhas consecutivas do ecrã. O valor da
+frequência deve ser obtido com o menor erro possivel
+Edite o seu programa no ficheiro £13.s.
+
+.equ    SFR_BASE_HI, 0xBF88
+        .equ    TRISE, 0x6100
+        .equ    LATE, 0x6120
+        .equ    PRINT_INT, 6
+        .equ    PUT_CHAR, 3
+        .equ    RESET_CORE_TIMER, 12
+        .equ    READ_CORE_TIMER, 11
+        .text
+        .globl main
+# Register Map
+# pattern : $s0
+# SFR_BASE_HI : $t1
+main:   addiu   $sp, $sp, -8            # Prólogo
+        sw      $ra, 0($sp)
+        sw      $s0, 4($sp)
+        lui     $t1, SFR_BASE_HI
+        lw      $t2, TRISE($t1)
+        andi    $t2, $t2, 0xFFE1        # 1111 1111 1110 0001
+        sw      $t2, TRISE($t1)         # TRISE = TRISE & 0xFFE1
+        li      $s0, 0b1001             # pattern = 0b1001
+while:  sll     $t0, $s0, 1             # while (1) {
+        lw      $t2, LATE($t1)
+        andi    $t2, $t2, 0xFFE1
+        or      $t2, $t2, $t0
+        sw      $t2, LATE($t1)          #   LATE = (LATE & 0xFFE1) | (pattern << 1)
+        li      $v0, PUT_CHAR
+        li      $a0, '\n'
+        syscall                         #   putChar('\r')
+        li      $v0, PRINT_INT
+        move    $a0, $s0
+        li      $a1, 4
+        sll     $a1, 16
+        ori     $a1, $a1, 2
+        syscall                         #   printInt(pattern, 2 | 4 << 16)
+        not     $s0, $s0
+        andi    $s0, $s0, 0x000F        #   pattern = !pattern & 0x000F
+        li      $a0, 143                #   (1 / 7) * 1000 = 142,86 (aprox igual a 143)
+        jal     delay                   #   delay(143)
+        j       while                   # }
+        lw      $s0, 4($sp)
+        lw      $ra, 0($sp)
+        addiu   $sp, $sp, 8
+        jr      $ra
+delay:  li      $v0, RESET_CORE_TIMER
+        syscall
+        li      $t0, 20000
+        mul     $t0, $t0, $a0
+whiled: li      $v0, READ_CORE_TIMER
+        syscall
+        bge     $v0, $t0, endwd
+        j       whiled
+endwd:  jr      $ra
+
+4. Use o ficheiro f203a.c para editar um programa que apresente no display mais significativo uma
+forma animada que simule uma cobra (Snake), correspondendo à sucessiva activação dos segmentos f
+a, b, g, c, d, c, g, um de cada vez. Cada segmento deve estar activo durante 0.25s.
+
+#include <detpic32.h>
+void delay(unsigned int ms) {
+        resetCoreTimer();
+        while (readCoreTimer() < 20000 * ms);
+}
+int main() {
+        TRISB = TRISB & 0x80FF; // 1000 0000 1111 1111
+        TRISD = TRISD & 0xFF9F; // 1111 1111 1001 1111
+        static const char ordem[] = {
+                0b0100000, // f
+                0b0000001, // a
+                0b0000010, // b
+                0b1000000, // g
+                0b0010000, // e
+                0b0001000, // d
+                0b0000100, // c
+                0b1000000  // g
+        };
+        int i = 0;
+        // Display mais significativo
+        LATD = (LATD & 0xFF9F) | 0x0040;
+        while (1) {
+                printInt(i, 10);
+                LATB = (LATB & 0x80FF) | (ordem[i] << 8);
+                i = (i + 1) % 8;
+                delay(250);
+        }
+        return 0;
+}
+4.b) Grave o programa anterior em f203b.c. Altere-o por forma a que o sinal analógico ligado à ADC 
+permita alterar dinamicamente a velocidade de deslocamento da Snake em 8 níveis (0.25s, 0.5s, ..., 2s).
+Faça a detecção do fim de conversão da ADC por polling.
+
+#include <detpic32.h>
+void delay(unsigned int ms) {
+        resetCoreTimer();
+        while (readCoreTimer() < 20000 * ms);
+}
+int main() {
+        TRISBbits.TRISB4 = 1;
+        AD1PCFGbits.PCFG4 = 0;
+        AD1CON1bits.SSRC = 7;
+        AD1CON1bits.CLRASAM = 1;
+        AD1CON3bits.SAMC = 16;
+        AD1CON2bits.SMPI = 0;
+        AD1CHSbits.CH0SA = 4;
+        AD1CON1bits.ON = 1;
+        TRISB = TRISB & 0x80FF; // 1000 0000 1111 1111
+        TRISD = TRISD & 0xFF9F; // 1111 1111 1001 1111
+        static const char ordem[] = {
+                0b0100000, // f
+                0b0000001, // a
+                0b0000010, // b
+                0b1000000, // g
+                0b0010000, // e
+                0b0001000, // d
+                0b0000100, // c
+                0b1000000  // g
+        };
+        static const int delayAmnt[] = {
+                250, 500, 750, 1000, 1250, 1500, 1750, 2000
+        };
+        int i = 0;
+        // Display mais significativo
+        LATD = (LATD & 0xFF9F) | 0x0040;
+        while (1) {
+                AD1CON1bits.ASAM = 1;
+                while (IFS1bits.AD1IF == 0);
+                LATB = (LATB & 0x80FF) | (ordem[i] << 8);
+                i = (i + 1) % 8;
+                int ms = delayAmnt[ADC1BUF0 * 7 / 1023];
+                IFS1bits.AD1IF = 0;
+                delay(ms);
+        }
+        return 0;
+}
+
+4.c) Grave o programa anterior em f203c.c e modifique-o por forma a desenhar a Snake nos dois dígitos
+do display, activando sucessivamente os segmentos f1, a1, b1, e2, d2, c2, b2, a2, f2, c1, d1, e1. 
+#include <detpic32.h>
+void delay(unsigned int ms) {
+        resetCoreTimer();
+        while (readCoreTimer() < 20000 * ms);
+}
+int main() {
+        TRISBbits.TRISB4 = 1;
+        AD1PCFGbits.PCFG4 = 0;
+        AD1CON1bits.SSRC = 7;
+        AD1CON1bits.CLRASAM = 1;
+        AD1CON3bits.SAMC = 16;
+        AD1CON2bits.SMPI = 0;
+        AD1CHSbits.CH0SA = 4;
+        AD1CON1bits.ON = 1;
+        TRISB = TRISB & 0x80FF; // 1000 0000 1111 1111
+        TRISD = TRISD & 0xFF9F; // 1111 1111 1001 1111
+        static const char ordem[12][2] = {
+                { 0b10, 0b0100000 }, // f1
+                { 0b10, 0b0000001 }, // a1
+                { 0b10, 0b0000010 }, // b1
+                { 0b01, 0b0010000 }, // e2
+                { 0b01, 0b0001000 }, // d2
+                { 0b01, 0b0000100 }, // c2
+                { 0b01, 0b0000010 }, // b2
+                { 0b01, 0b0000001 }, // a2
+                { 0b01, 0b0100000 }, // f2
+                { 0b10, 0b0000100 }, // c1
+                { 0b10, 0b0001000 }, // d1
+                { 0b10, 0b0010000 }  // e1
+        };
+        static const int delayAmnt[] = {
+                250, 500, 750, 1000, 1250, 1500, 1750, 2000
+        };
+        int i = 0;
+        // Display mais significativo
+        LATD = (LATD & 0xFF9F) | 0x0040;
+        while (1) {
+                AD1CON1bits.ASAM = 1;
+                while (IFS1bits.AD1IF == 0);
+                LATD = (LATD & 0xFF9F) | (ordem[i][0] << 5);
+                LATB = (LATB & 0x80FF) | (ordem[i][1] << 8);
+                i = (i + 1) % 12;
+                int ms = delayAmnt[ADC1BUF0 * 7 / 1023];
+                IFS1bits.AD1IF = 0;
+                delay(ms);
+        }
+        return 0;
+}
+
+5. Escreva e teste um programa, em linguagem C, que faça todas as configurações necessárias e que mostre nos
+6 LEDs ligados aos portos RE7 a RE2, o padrão 110000 011000, 001100,..., 000011, 110000, 011000, O
+padrão deve mudar com uma frequência que depende do estado lógico dos "switches" DS3 e DS1 (ligados aos
+portos RB2 e RBO): ambos OFF, f=3.5Hz; ambos ON, f=10.5Hz; qualquer outra combinação mantém a
+frequência anterior (valor inicial: 10.5Hz). O valor da frequência deve ser obtido com o menor erro possível.
+Edite o seu programa no ficheiro £81. c.
+
+#include <detpic32.h>
+void delay(unsigned int ms) {
+        resetCoreTimer();
+        while (readCoreTimer() < 20000 * ms);
+}
+int main() {
+        TRISE = TRISE & 0xFF03; // 1111 1111 0000 0011
+        TRISB = TRISB | 0x0005; // 0000 0000 0000 0101
+        static double freq = 10.5;
+        unsigned int padrao = 0b110000;
+        while (1) {
+                LATE = (LATE & 0xFF03) | (padrao << 2);
+                padrao = padrao >> 1;
+                if (padrao <= 1) padrao = 0b110000;
+                int ds1 = PORTBbits.RB0;
+                int ds3 = PORTBbits.RB2;
+                if (ds1 && ds3) freq = 10.5;
+                else if (!(ds1 || ds3)) freq = 3.5;
+                double ms = 1000.0 / freq;
+                delay( (int) ms );
+        }
+}
+6. Escreva e teste um programa, em linguagem C, que faça todas as configurações necessárias e que converta o
+sinal na entrada do módulo A/D, à frequência de 4Hz, com 4 conversões por cada amostra, e que:
+i) mostre no ecrã do PC o complemento para 1 da média dos resultados da conversão, em binário formatado
+com 12 bits (os valores devem ser apresentados sempre na mesma linha do ecrã);
+ii) apresente uma medida do valor obtido, em hexadecimal, numa escala 4 a E, no display mais significativo ou
+menos significativo, dependendo do estado do "switch" DS4 (ligado ao porto RB3): DS4 ON mostrar no display
+menos significativo;
+iii) a cada nova conversão mude o padrão dos LEDs ligados aos portos RE6 e RE1 entre 01, 10, 01, ... (valor
+inicial: RE6=1, RE1=0).
+Faça a deteção do fim de conversão por polling. Edite o seu programa no ficheiro £82.c.
+
+#include <detpic32.h>
+
+#define NSamples 4
+
+void delay(unsigned int ms) {
+        resetCoreTimer();
+        while (readCoreTimer() < 20000 * ms);
+}
+int main() {
+        static const char disp7S[] = {
+                0b0111111, // 0
+                0b0000110, // 1
+                0b1011011, // 2
+                0b1001111, // 3
+                0b1100110, // 4
+                0b1101101, // 5
+                0b1111101, // 6
+                0b0000111, // 7
+                0b1111111, // 8
+                0b1101111, // 9
+                0b1110111, // A
+                0b1111100, // B
+                0b0111001, // C
+                0b1011110, // D
+                0b1111001, // E
+                0b1110001  // F
+        };
+        TRISBbits.TRISB4 = 1;
+        AD1PCFGbits.PCFG4 = 0;
+        AD1CON1bits.SSRC = 7;
+        AD1CON1bits.CLRASAM = 1;
+        AD1CON3bits.SAMC = 16;
+        AD1CON2bits.SMPI = NSamples - 1;
+        AD1CHSbits.CH0SA = 4;
+        AD1CON1bits.ON = 1;
+        TRISB = TRISB & 0x80FF; // 1000 0000 1111 1111
+        TRISD = TRISD & 0xFF9F; // 1111 1111 1001 1111
+        TRISB = TRISB | 0x0008; // 0000 0000 0000 1000
+        TRISE = TRISE & 0xFFBD; // 1111 1111 1011 1101
+        LATE = (LATE & 0xFFBD) | 0x0040;
+        while (1) {
+                AD1CON1bits.ASAM = 1;
+                while (IFS1bits.AD1IF == 0);
+                // Parte i)
+                int media = 0;
+                int i = 0;
+                int *p = (int *)(&ADC1BUF0);
+                for (; i < NSamples; i++) {
+                        media += p[i*4];
+                }
+                media = media / NSamples;
+                putChar('\r');
+                printInt(~media, 2 | 12 << 16);
+                // Parte ii)
+                int valor = media * 10 / 1023;                          // Escala de 0 a 10
+                int ds4 = (PORTB >> 3) & 0x0001;                        // Obter o valor de RB3 (Dip Switch 4)
+                LATD = ds4 ?
+                (LATD & 0xFF9F) | 0x0020 :                      // DS4 ON --> Display menos significativo                        (LATD & 0xFF9F) | 0x0040;                       // DS4 OFF -> Display mais  significativo
+                LATB = (LATB & 0x80FF) | (disp7S[valor + 4] << 8);      // valor + 4 -> Passar da escala de (0 a A) para (4 a E)
+                // Parte iii)
+                LATEbits.LATE6 = !LATEbits.LATE6;
+                LATEbits.LATE1 = !LATEbits.LATE1;
+                delay(250);
+        }
+}
+7. Escreva e teste um programa, em assembly, que faça todas as configurações necessárias e que mostre nos 5
+LEDs, ligados aos portos RE6 a RE2, o valor de um contador decrescente módulo 25 (valor inicial: 0); o
+contador deve ser decrementado com uma frequência de 3.5Hz. O valor do contador deve também ser
+mostrado no ecrã do PC, em binário formatado com 5 bits; os valores devem ser apresentados em linhas
+consecutivas do ecrã. O valor da frequência deve ser obtido com o menor erro possível.
+Edite o seu programa no ficheiro f83.s.
+        .equ    SFR_BASE_HI, 0xBF88
+        .equ    TRISE, 0x6100
+        .equ    LATE, 0x6120
+        .equ    PRINT_INT, 6
+        .equ    PUT_CHAR, 3
+        .equ    RESET_CORE_TIMER, 12
+        .equ    READ_CORE_TIMER, 11
+        .text
+        .globl main
+# Register Map
+# counter : $s0
+main:   addiu   $sp, $sp, -8
+        sw      $s0, 0($sp)
+        sw      $ra, 4($sp)
+        lui     $t0, SFR_BASE_HI
+        lw      $t1, TRISE($t0)
+        andi    $t1, $t1, 0xFF83                # 1111 1111 1000 0011
+        sw      $t1, TRISE($t0)                 # TRISE = TRISE & 0xFF83
+        li      $s0, 0                          # counter = 0
+while:  lw      $t1, LATE($t0)                  # while (1) {
+        andi    $t1, $t1, 0xFF83
+        sll     $t2, $s0, 2
+        or      $t1, $t1, $t2
+        sw      $t1, LATE($t0)                  #   LATE = (LATE & 0xFF83) | (counter << 2)
+        li      $v0, PRINT_INT
+        move    $a0, $s0
+        li      $a1, 5
+        sll     $a1, $a1, 16
+        ori     $a1, $a1, 2
+        syscall                                 #   printInt(counter, 2 | 5 << 16)
+        li      $v0, PUT_CHAR
+        li      $a0, '\n'
+        syscall                                 #   putChar('\n')
+        addiu   $s0, $s0, -1                    #   counter--
+if1:    bge     $s0, 0, endif1                  #   if (counter < 0)
+        li      $s0, 24                         #     counter = 24
+endif1: li      $a0, 286                        #   // 1000 / 3.5 = 285,7 (aprox igual a 286)
+        jal     delay                           #   delay(286)
+        j       while                           # }
+        lw      $ra, 4($sp)
+        lw      $s0, 0($sp)
+        addiu   $sp, $sp, 8
+        jr      $ra
+delay:  li      $v0, RESET_CORE_TIMER
+        syscall
+        mul     $a0, $a0, 20000
+whiled: li      $v0, READ_CORE_TIMER
+        syscall
+        bge     $v0, $a0, endwd
+        j       whiled
+endwd:  jr      $ra
